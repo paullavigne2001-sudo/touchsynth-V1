@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>TouchSynth — Touche & Son</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #050508;
+    --ui: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.45);
+    --accent: #fff;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: 'Space Mono', monospace;
+    touch-action: none;
+    cursor: none;
+  }
+
+  canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* HUD */
+  #hud {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 20px 24px;
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  #title {
+    font-size: 11px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  #info {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text);
+    text-align: right;
+    line-height: 1.8;
+  }
+
+  #info span { color: rgba(255,255,255,0.75); }
+
+  /* Waveform bar */
+  #waveform {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 3px;
+    align-items: center;
+    z-index: 10;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #waveform.active { opacity: 1; }
+  .bar {
+    width: 3px;
+    height: 4px;
+    background: rgba(255,255,255,0.5);
+    border-radius: 2px;
+    transition: height 0.05s;
+  }
+
+  /* Hint overlay */
+  #hint {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    z-index: 20;
+    pointer-events: none;
+    transition: opacity 0.8s;
+  }
+  #hint.gone { opacity: 0; }
+
+  .hint-icon {
+    width: 52px; height: 52px;
+    border: 1.5px solid rgba(255,255,255,0.2);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  .hint-icon svg { opacity: 0.5; }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); border-color: rgba(255,255,255,0.15); }
+    50% { transform: scale(1.12); border-color: rgba(255,255,255,0.35); }
+  }
+
+  .hint-text {
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.3);
+  }
+
+  /* Custom cursor */
+  #cursor {
+    position: fixed;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: white;
+    pointer-events: none;
+    z-index: 100;
+    transform: translate(-50%, -50%);
+    mix-blend-mode: difference;
+    transition: width 0.15s, height 0.15s, opacity 0.2s;
+    opacity: 0;
+  }
+  #cursor.visible { opacity: 1; }
+  #cursor.active { width: 20px; height: 20px; }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="hud">
+  <div id="title">TouchSynth</div>
+  <div id="info">
+    Note : <span id="noteName">—</span><br>
+    Fréq : <span id="freqVal">—</span> Hz<br>
+    Mode : <span id="modeVal">Sine</span>
+  </div>
+</div>
+
+<div id="waveform">
+  <!-- bars injected by JS -->
+</div>
+
+<div id="hint">
+  <div class="hint-icon">
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <path d="M11 2v4M11 16v4M2 11h4M16 11h4M4.93 4.93l2.83 2.83M14.24 14.24l2.83 2.83M4.93 17.07l2.83-2.83M14.24 7.76l2.83-2.83" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <div class="hint-text">Touche l'écran</div>
+</div>
+
+<div id="cursor"></div>
+
+<script>
+// ── Audio Engine ──────────────────────────────────────────────
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let ctx = null;
+let masterGain = null;
+const oscillators = {};
+
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const WAVEFORMS = ['sine','triangle','sawtooth','square'];
+let waveformIndex = 0;
+
+function createAudioContext() {
+  if (ctx) return;
+  ctx = new AudioContext();
+  masterGain = ctx.createGain();
+  masterGain.gain.value = 0.5;
+  const reverbInput = createReverb(ctx);
+  masterGain.connect(reverbInput);
+}
+
+
+function createReverb(audioCtx) {
+  const convolver = audioCtx.createConvolver();
+  const length = audioCtx.sampleRate * 1.5;
+  const buffer = audioCtx.createBuffer(2, length, audioCtx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = 0; i < length; i++) data[i] = (Math.random()*2-1) * Math.pow(1 - i/length, 2.5);
+  }
+  convolver.buffer = buffer;
+
+  // input → dry → destination
+  //       → convolver → wet → destination
+  const input    = audioCtx.createGain();
+  const dry      = audioCtx.createGain(); dry.gain.value = 0.6;
+  const wet      = audioCtx.createGain(); wet.gain.value = 0.35;
+
+  input.connect(dry);
+  input.connect(convolver);
+  convolver.connect(wet);
+  dry.connect(audioCtx.destination);
+  wet.connect(audioCtx.destination);
+
+  return input; // caller connects masterGain → input
+}
+
+function xToFreq(x) {
+  // Map x [0..width] to pentatonic scale across 2 octaves
+  const W = canvas.width;
+  const PENTA = [0,2,4,7,9]; // semitones
+  const steps = PENTA.length * 2; // 2 octaves
+  const idx = Math.floor((x / W) * steps);
+  const octave = Math.floor(idx / PENTA.length);
+  const semi = PENTA[idx % PENTA.length];
+  const midiNote = 48 + octave * 12 + semi; // C3 base
+  const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
+  const noteName = NOTE_NAMES[midiNote % 12] + (Math.floor(midiNote / 12) - 1);
+  return { freq, noteName, midiNote };
+}
+
+function yToDetune(y) {
+  const H = canvas.height;
+  return ((y / H) * 2 - 1) * 50; // ±50 cents
+}
+
+function yToFilterFreq(y) {
+  const H = canvas.height;
+  return 200 + (1 - y / H) * 8000;
+}
+
+function startNote(id, x, y) {
+  createAudioContext();
+  ctx.resume(); // fire-and-forget, pas de await
+  if (oscillators[id]) return;
+  const { freq, noteName } = xToFreq(x);
+
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const filter = ctx.createBiquadFilter();
+
+  osc.type = WAVEFORMS[waveformIndex];
+  osc.frequency.value = freq;
+  osc.detune.value = yToDetune(y);
+
+  filter.type = 'lowpass';
+  filter.frequency.value = yToFilterFreq(y);
+  filter.Q.value = 4;
+
+  gain.gain.setValueAtTime(0, ctx.currentTime);
+  gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + 0.02);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(masterGain);
+  osc.start();
+
+  oscillators[id] = { osc, gain, filter, noteName, freq };
+  updateHUD(noteName, freq);
+}
+
+function updateNote(id, x, y) {
+  const o = oscillators[id];
+  if (!o || !ctx) return;
+  const { freq, noteName } = xToFreq(x);
+  o.osc.frequency.setTargetAtTime(freq, ctx.currentTime, 0.03);
+  o.osc.detune.setTargetAtTime(yToDetune(y), ctx.currentTime, 0.05);
+  o.filter.frequency.setTargetAtTime(yToFilterFreq(y), ctx.currentTime, 0.05);
+  o.noteName = noteName; o.freq = freq;
+  updateHUD(noteName, freq);
+}
+
+function stopNote(id) {
+  const o = oscillators[id];
+  if (!o || !ctx) return;
+  // Annule un éventuel cleanup en attente
+  if (o.cleanupTimer) clearTimeout(o.cleanupTimer);
+  o.gain.gain.cancelScheduledValues(ctx.currentTime);
+  o.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+  // Supprime immédiatement de oscillators pour que startNote puisse recréer la note
+  delete oscillators[id];
+  o.cleanupTimer = setTimeout(() => { try { o.osc.stop(); } catch(e){} }, 500);
+}
+
+function updateHUD(noteName, freq) {
+  document.getElementById('noteName').textContent = noteName;
+  document.getElementById('freqVal').textContent = Math.round(freq);
+}
+
+// ── Canvas / Visual Engine ────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const g = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Particle trail system
+const trails = []; // { x, y, vx, vy, hue, size, alpha, id }
+const blobs = [];   // { x, y, hue, r, alpha } – persistent glow spots
+
+function hueFromX(x) { return (x / canvas.width) * 280 + 20; } // warm→cool
+function satFromY(y) { return 60 + (1 - y / canvas.height) * 40; }
+
+const pointers = {}; // id → { x, y, hue, active }
+
+function spawnParticles(id, x, y, moving) {
+  const hue = hueFromX(x);
+  const count = moving ? 3 : 6;
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = moving ? Math.random() * 1.5 : Math.random() * 2.5 + 0.5;
+    trails.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      hue,
+      size: moving ? Math.random() * 4 + 2 : Math.random() * 8 + 4,
+      alpha: 1,
+      decay: 0.012 + Math.random() * 0.018,
+    });
+  }
+  // Persistent blob
+  blobs.push({ x, y, hue, r: moving ? 30 : 60, alpha: 0.25 });
+}
+
+function draw() {
+  // Fade canvas
+  g.fillStyle = 'rgba(5,5,8,0.18)';
+  g.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw blobs
+  for (let i = blobs.length - 1; i >= 0; i--) {
+    const b = blobs[i];
+    b.alpha -= 0.003;
+    if (b.alpha <= 0) { blobs.splice(i,1); continue; }
+    const grad = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+    grad.addColorStop(0, `hsla(${b.hue},90%,65%,${b.alpha})`);
+    grad.addColorStop(1, `hsla(${b.hue},90%,65%,0)`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(b.x, b.y, b.r, 0, Math.PI*2);
+    g.fill();
+  }
+
+  // Draw particles
+  for (let i = trails.length - 1; i >= 0; i--) {
+    const p = trails[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+    p.alpha -= p.decay;
+    p.size *= 0.98;
+    if (p.alpha <= 0) { trails.splice(i,1); continue; }
+    g.beginPath();
+    const grad = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+    grad.addColorStop(0, `hsla(${p.hue},95%,75%,${p.alpha})`);
+    grad.addColorStop(1, `hsla(${p.hue},95%,75%,0)`);
+    g.fillStyle = grad;
+    g.arc(p.x, p.y, p.size, 0, Math.PI*2);
+    g.fill();
+  }
+
+  // Active touch rings
+  for (const id in pointers) {
+    const p = pointers[id];
+    if (!p.active) continue;
+    const t = performance.now() / 1000;
+    const pulse = 1 + Math.sin(t * 8) * 0.06;
+    g.beginPath();
+    g.arc(p.x, p.y, 22 * pulse, 0, Math.PI*2);
+    g.strokeStyle = `hsla(${p.hue},90%,70%,0.7)`;
+    g.lineWidth = 1.5;
+    g.stroke();
+
+    g.beginPath();
+    g.arc(p.x, p.y, 8, 0, Math.PI*2);
+    g.fillStyle = `hsla(${p.hue},90%,80%,0.9)`;
+    g.fill();
+  }
+
+  // Waveform bars
+  animateBars();
+  requestAnimationFrame(draw);
+}
+
+// ── Waveform visualizer ───────────────────────────────────────
+const waveformEl = document.getElementById('waveform');
+const NUM_BARS = 24;
+const barEls = [];
+for (let i = 0; i < NUM_BARS; i++) {
+  const b = document.createElement('div');
+  b.className = 'bar';
+  waveformEl.appendChild(b);
+  barEls.push(b);
+}
+
+function animateBars() {
+  const active = Object.keys(oscillators).length > 0;
+  waveformEl.classList.toggle('active', active);
+  if (!active) return;
+  const t = performance.now() / 1000;
+  barEls.forEach((b, i) => {
+    const h = active ? 4 + Math.abs(Math.sin(t * 4 + i * 0.4)) * 28 : 4;
+    b.style.height = h + 'px';
+    // color from active note
+    const ids = Object.keys(oscillators);
+    if (ids.length > 0) {
+      const hue = hueFromX(pointers[ids[0]]?.x || canvas.width/2);
+      b.style.background = `hsla(${hue},80%,70%,0.7)`;
+    }
+  });
+}
+
+draw();
+
+// ── Input Handling ────────────────────────────────────────────
+const hint = document.getElementById('hint');
+const cursor = document.getElementById('cursor');
+let hintGone = false;
+
+function dismissHint() {
+  if (!hintGone) { hint.classList.add('gone'); hintGone = true; }
+}
+
+// Waveform cycle on double-tap / right-click
+let lastTap = 0;
+canvas.addEventListener('touchstart', e => {
+  const now = Date.now();
+  if (now - lastTap < 300 && e.touches.length === 1) {
+    waveformIndex = (waveformIndex + 1) % WAVEFORMS.length;
+    document.getElementById('modeVal').textContent = WAVEFORMS[waveformIndex].charAt(0).toUpperCase() + WAVEFORMS[waveformIndex].slice(1);
+    // Retrigger all active oscillators with new waveform
+    for (const id in oscillators) oscillators[id].osc.type = WAVEFORMS[waveformIndex];
+  }
+  lastTap = now;
+}, { passive: true });
+
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  waveformIndex = (waveformIndex + 1) % WAVEFORMS.length;
+  document.getElementById('modeVal').textContent = WAVEFORMS[waveformIndex].charAt(0).toUpperCase() + WAVEFORMS[waveformIndex].slice(1);
+});
+
+// Touch
+canvas.addEventListener('touchstart', e => {
+  createAudioContext();
+  if (ctx.state !== 'running') ctx.resume();
+  dismissHint();
+  for (const touch of e.changedTouches) {
+    const id = touch.identifier;
+    const x = touch.clientX, y = touch.clientY;
+    const hue = hueFromX(x);
+    pointers[id] = { x, y, hue, active: true };
+    startNote(id, x, y);
+    spawnParticles(id, x, y, false);
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    const id = touch.identifier;
+    const x = touch.clientX, y = touch.clientY;
+    if (pointers[id]) {
+      pointers[id].x = x; pointers[id].y = y;
+      pointers[id].hue = hueFromX(x);
+    }
+    updateNote(id, x, y);
+    spawnParticles(id, x, y, true);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  for (const touch of e.changedTouches) {
+    const id = touch.identifier;
+    stopNote(id);
+    if (pointers[id]) pointers[id].active = false;
+    setTimeout(() => delete pointers[id], 600);
+  }
+}, { passive: true });
+
+// Mouse
+canvas.addEventListener('mousemove', e => {
+  cursor.style.left = e.clientX + 'px';
+  cursor.style.top = e.clientY + 'px';
+  if (pointers['mouse']?.active) {
+    pointers['mouse'].x = e.clientX; pointers['mouse'].y = e.clientY;
+    pointers['mouse'].hue = hueFromX(e.clientX);
+    updateNote('mouse', e.clientX, e.clientY);
+    spawnParticles('mouse', e.clientX, e.clientY, true);
+  }
+});
+
+canvas.addEventListener('mousedown', e => {
+  createAudioContext();
+  if (ctx.state !== 'running') ctx.resume();
+  dismissHint();
+  cursor.classList.add('active');
+  const x = e.clientX, y = e.clientY;
+  pointers['mouse'] = { x, y, hue: hueFromX(x), active: true };
+  startNote('mouse', x, y);
+  spawnParticles('mouse', x, y, false);
+});
+
+canvas.addEventListener('mouseup', () => {
+  cursor.classList.remove('active');
+  stopNote('mouse');
+  if (pointers['mouse']) pointers['mouse'].active = false;
+  setTimeout(() => delete pointers['mouse'], 600);
+});
+
+// ── Safety: stop all notes on any interrupt ───────────────────
+function stopAllNotes() {
+  cursor.classList.remove('active');
+  for (const id in oscillators) stopNote(id);
+  for (const id in pointers) pointers[id].active = false;
+}
+
+// Finger lifted outside the canvas / interrupted by system gesture
+canvas.addEventListener('touchcancel', e => {
+  for (const touch of e.changedTouches) {
+    stopNote(touch.identifier);
+    if (pointers[touch.identifier]) pointers[touch.identifier].active = false;
+  }
+}, { passive: true });
+
+// Mouse released outside the canvas
+canvas.addEventListener('mouseleave', e => {
+  cursor.classList.remove('visible');
+  // Ne coupe que si le bouton est vraiment relâché
+  if (pointers['mouse']?.active && !(e.buttons & 1)) {
+    cursor.classList.remove('active');
+    stopNote('mouse');
+    if (pointers['mouse']) pointers['mouse'].active = false;
+  }
+});
+
+// Reprend la note si on revient dans le canvas bouton encore enfoncé
+canvas.addEventListener('mouseenter', e => {
+  cursor.classList.add('visible');
+  if ((e.buttons & 1) && !pointers['mouse']?.active) {
+    const x = e.clientX, y = e.clientY;
+    pointers['mouse'] = { x, y, hue: hueFromX(x), active: true };
+    startNote('mouse', x, y);
+    cursor.classList.add('active');
+  }
+});
+
+// Tab hidden ou fenêtre perdue — coupe uniquement la souris, pas les touches actives
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopNote('mouse');
+    if (pointers['mouse']) pointers['mouse'].active = false;
+  }
+});
+
+window.addEventListener('blur', () => {
+  stopNote('mouse');
+  if (pointers['mouse']) pointers['mouse'].active = false;
+});
+</script>
+</body>
+</html>
