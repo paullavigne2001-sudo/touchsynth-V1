@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>TouchSynth — Touche & Son</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#050508">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="TouchSynth">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
 
@@ -569,6 +573,10 @@ window.addEventListener('blur', () => {
   stopNote('mouse');
   if (pointers['mouse']) pointers['mouse'].active = false;
 });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+}
 </script>
 </body>
 </html>
